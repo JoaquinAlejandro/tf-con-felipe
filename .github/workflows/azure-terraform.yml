@@ -1,3 +1,19 @@
+# =============================================================================
+# Terraform Azure OIDC CI/CD — Pipeline completo
+# =============================================================================
+#
+# Flujo:
+#   PR → fmt → validate → tfsec → plan → artefacto (1 día) → comentario en PR
+#   Dispatch (apply)  → descarga plan → apply → outputs → guarda en Azure Storage
+#   Dispatch (destroy) → destroy
+#
+# Prerrequisitos:
+#   1. Ejecutar BOOTSTRAP/ una vez (crea Storage Account para historial)
+#   2. Configurar environment "production" en GitHub Settings → Environments
+#   3. Agregar secrets: AZURE_CLIENT_ID, AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID,
+#      AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CONTAINER_NAME
+# =============================================================================
+
 name: 'Terraform Azure OIDC CI/CD'
 
 on:
@@ -8,65 +24,40 @@ on:
       - 'AZURE/**'
   workflow_dispatch:
     inputs:
-      confirmar_apply:
-        description: 'Escribe "yes" para confirmar la creación de recursos'
+      accion:
+        description: '¿Qué acción ejecutar?'
         required: true
-        default: 'no'
+        type: choice
+        options:
+          - 'apply'
+          - 'destroy'
+        default: 'apply'
 
-# Permiso a GitHub para pedir el token JWT a Azure.
+# Permiso a GitHub para pedir el token JWT a Azure (OIDC)
 permissions:
-  id-token: write 
+  id-token: write
   contents: read
+  pull-requests: write   # Necesario para publicar comentario en el PR
 
-# Se inyectan IDs publicos 
+# Secrets inyectados como variables de entorno
 env:
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-  ARM_USE_OIDC: true # Autenticacion sin contraseña de terraform
+  ARM_USE_OIDC: true
 
+# =============================================================================
+# Job 1: Plan — se ejecuta automáticamente en cada PR
+# =============================================================================
 jobs:
-  terraform-plan:
-    name: 'Build y Plan'
+  Plan:
+    name: 'Plan'
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     defaults:
       run:
         working-directory: ./AZURE
-    steps:
-      - name: Clonar el repositorio
-        uses: actions/checkout@v3
 
-      # Autenticación segura vía Azure Login Action usando OIDC
-      - name: 'Az CLI login con OIDC'
-        uses: azure/login@v1
-        with:
-          client-id: ${{ env.ARM_CLIENT_ID }}
-          tenant-id: ${{ env.ARM_TENANT_ID }}
-          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
-
-      - name: Instalar Terraform
-        uses: hashicorp/setup-terraform@v2
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Plan
-        run: terraform plan -out=tfplan
-
-      - name: Guardar Plan como Artefacto
-        uses: actions/upload-artifact@v4
-        with:
-          name: reporte-plan-azure
-          path: ./AZURE/tfplan
-
-  terraform-apply:
-    name: 'Apply Manual'
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirmar_apply == 'yes'
-    defaults:
-      run:
-        working-directory: ./AZURE
     steps:
       - name: Clonar el repositorio
         uses: actions/checkout@v4
@@ -84,5 +75,153 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
+      - name: Terraform fmt (validar formato)
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Security Scan (tfsec)
+        uses: aquasecurity/tfsec-action@v1
+        with:
+          working_directory: ./AZURE
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -out=tfplan -no-color 2>&1 | tee plan-output.txt
+          echo "PLAN_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      - name: Guardar Plan como Artefacto (1 día de retención)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-plan-azure
+          path: ./AZURE/tfplan
+          retention-days: 1
+
+      - name: Publicar Plan como comentario en el PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('./AZURE/plan-output.txt', 'utf8');
+
+            // Truncar si es muy largo (GitHub limita comentarios a ~65536 chars)
+            const maxLength = 60000;
+            const truncated = planOutput.length > maxLength
+              ? planOutput.substring(0, maxLength) + '\n\n... (plan truncado por longitud)'
+              : planOutput;
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📋 Terraform Plan\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n> ⚠️ El plan expira en **24 horas**. Ejecutá el Apply antes de que venza.`
+            });
+
+# =============================================================================
+# Job 2: Apply — se ejecuta manualmente vía workflow_dispatch
+# =============================================================================
+  Apply:
+    name: 'Apply'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.accion == 'apply'
+    environment: production   # Requiere aprobación manual en GitHub
+    defaults:
+      run:
+        working-directory: ./AZURE
+
+    steps:
+      - name: Clonar el repositorio
+        uses: actions/checkout@v4
+
+      - name: 'Az CLI login con OIDC'
+        uses: azure/login@v1
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Descargar Plan
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: reporte-plan-azure
+          path: ./AZURE
+        continue-on-error: true
+
+      - name: Verificar que existe el plan
+        if: steps.download.outcome == 'failure'
+        run: |
+          echo "============================================"
+          echo "  No hay plan, volver a ejecutar Plan"
+          echo "============================================"
+          echo ""
+          echo "El artefacto del plan no existe o expiró (retención: 1 día)."
+          echo "Abrí un Pull Request o re-ejecutá el workflow de Plan primero."
+          exit 1
+
       - name: Terraform Apply
-        run: terraform apply -auto-approve
+        run: terraform apply tfplan
+
+      - name: Publicar Outputs en Job Summary
+        run: |
+          echo "## 📤 Terraform Outputs" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          terraform output -json >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Guardar plan en Azure Storage (historial)
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          BLOB_NAME="plans/tfplan-${TIMESTAMP}-${SHA_SHORT}.plan"
+
+          az storage blob upload \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }} \
+            --container-name ${{ secrets.AZURE_STORAGE_CONTAINER_NAME }} \
+            --name "${BLOB_NAME}" \
+            --file ./tfplan \
+            --auth-mode login
+
+          echo "✅ Plan guardado en Azure Storage: ${BLOB_NAME}"
+          echo "## 📦 Plan guardado en Azure Storage" >> $GITHUB_STEP_SUMMARY
+          echo "\`${BLOB_NAME}\`" >> $GITHUB_STEP_SUMMARY
+
+# =============================================================================
+# Job 3: Destroy — se ejecuta manualmente vía workflow_dispatch
+# =============================================================================
+  Destroy:
+    name: 'Destroy'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.accion == 'destroy'
+    environment: production   # Requiere aprobación manual en GitHub
+    defaults:
+      run:
+        working-directory: ./AZURE
+
+    steps:
+      - name: Clonar el repositorio
+        uses: actions/checkout@v4
+
+      - name: 'Az CLI login con OIDC'
+        uses: azure/login@v1
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve
