@@ -58,7 +58,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: reporte-plan-azure
-          path: ./azure/tfplan
+          path: ./AZURE/tfplan
 
   terraform-apply:
     name: 'Apply Manual'
@@ -66,7 +66,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirmar_apply == 'yes'
     defaults:
       run:
-        working-directory: ./azure
+        working-directory: ./AZURE
     steps:
       - name: Clonar el repositorio
         uses: actions/checkout@v3
