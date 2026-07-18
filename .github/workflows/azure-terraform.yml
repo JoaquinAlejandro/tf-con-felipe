@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Flujo:
-#   PR → Validate (fmt + validate + tfsec) → comentario en PR
+#   PR → Validate (fmt + validate + trivy) → comentario en PR
 #   Push a main o manual (plan) → Plan → artefacto (1 día)
 #   Dispatch (apply)  → descarga plan → apply → outputs → guarda en Azure Storage
 #   Dispatch (destroy) → destroy
@@ -90,10 +90,10 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-      - name: Security Scan (tfsec)
+      - name: Security Scan (Trivy)
         run: |
-          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
-          tfsec .
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.60.0
+          trivy config .
 
       - name: Resultado de validación
         uses: actions/github-script@v7
@@ -103,7 +103,7 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## ✅ Validación exitosa\n\n- terraform fmt: ✅\n- terraform validate: ✅\n- tfsec (security scan): ✅\n\n> Para generar un plan, mergeá este PR a \`main\` o ejecutá manual \`plan\` desde Actions.`
+              body: `## ✅ Validación exitosa\n\n- terraform fmt: ✅\n- terraform validate: ✅\n- trivy (security scan): ✅\n\n> Para generar un plan, mergeá este PR a \`main\` o ejecutá manual \`plan\` desde Actions.`
             });
 
 # =============================================================================
@@ -142,10 +142,10 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-      - name: Security Scan (tfsec)
+      - name: Security Scan (Trivy)
         run: |
-          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
-          tfsec .
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.60.0
+          trivy config .
 
       - name: Terraform Plan
         id: plan
