@@ -4,7 +4,8 @@
 #
 # Flujo:
 #   PR → fmt → validate → tfsec → plan → artefacto (1 día) → comentario en PR
-#   Dispatch (apply)  → descarga plan → apply → outputs → guarda en Azure Storage
+#   Push a main → Plan → artefacto (1 día)
+#   Dispatch (apply)  → descarga plan del último push a main → apply → outputs → guarda en Azure Storage
 #   Dispatch (destroy) → destroy
 #
 # Prerrequisitos:
@@ -17,6 +18,11 @@
 name: 'Terraform Azure OIDC CI/CD'
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'AZURE/**'
   pull_request:
     branches:
       - main
@@ -47,13 +53,13 @@ env:
   ARM_USE_OIDC: true
 
 # =============================================================================
-# Job 1: Plan — se ejecuta automáticamente en cada PR
+# Job 1: Plan — se ejecuta en PR y en push a main
 # =============================================================================
 jobs:
   Plan:
     name: 'Plan'
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     defaults:
       run:
         working-directory: ./AZURE
@@ -102,6 +108,7 @@ jobs:
           retention-days: 1
 
       - name: Publicar Plan como comentario en el PR
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -153,10 +160,10 @@ jobs:
       - name: Descargar Plan
         id: download
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: reporte-plan-azure
           path: ./AZURE
-        continue-on-error: true
 
       - name: Verificar que existe el plan
         if: steps.download.outcome == 'failure'
@@ -165,8 +172,7 @@ jobs:
           echo "  No hay plan, volver a ejecutar Plan"
           echo "============================================"
           echo ""
-          echo "El artefacto del plan no existe o expiró (retención: 1 día)."
-          echo "Abrí un Pull Request o re-ejecutá el workflow de Plan primero."
+          echo "Primero ejecutá un push a main para generar un plan."
           exit 1
 
       - name: Terraform Apply
