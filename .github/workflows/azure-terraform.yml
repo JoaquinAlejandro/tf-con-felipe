@@ -82,9 +82,9 @@ jobs:
         run: terraform validate
 
       - name: Security Scan (tfsec)
-        uses: aquasecurity/tfsec-action@v1
-        with:
-          working_directory: ./AZURE
+        run: |
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          tfsec .
 
       - name: Terraform Plan
         id: plan
