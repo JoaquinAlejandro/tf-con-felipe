@@ -3,9 +3,9 @@
 # =============================================================================
 #
 # Flujo:
-#   PR → fmt → validate → tfsec → plan → artefacto (1 día) → comentario en PR
-#   Push a main → Plan → artefacto (1 día)
-#   Dispatch (apply)  → descarga plan del último push a main → apply → outputs → guarda en Azure Storage
+#   PR → Validate (fmt + validate + tfsec) → comentario en PR
+#   Push a main o manual (plan) → Plan → artefacto (1 día)
+#   Dispatch (apply)  → descarga plan → apply → outputs → guarda en Azure Storage
 #   Dispatch (destroy) → destroy
 #
 # Prerrequisitos:
@@ -35,9 +35,10 @@ on:
         required: true
         type: choice
         options:
+          - 'plan'
           - 'apply'
           - 'destroy'
-        default: 'apply'
+        default: 'plan'
 
 # Permiso a GitHub para pedir el token JWT a Azure (OIDC)
 permissions:
@@ -53,13 +54,65 @@ env:
   ARM_USE_OIDC: true
 
 # =============================================================================
-# Job 1: Plan — se ejecuta en PR y en push a main
+# Job 1: Validate — se ejecuta en cada PR (solo validación, sin plan)
 # =============================================================================
 jobs:
+  Validate:
+    name: 'Validate'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        working-directory: ./AZURE
+
+    steps:
+      - name: Clonar el repositorio
+        uses: actions/checkout@v4
+
+      - name: 'Az CLI login con OIDC'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform fmt (validar formato)
+        run: |
+          terraform fmt -recursive
+          git diff --exit-code
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Security Scan (tfsec)
+        run: |
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          tfsec .
+
+      - name: Resultado de validación
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ Validación exitosa\n\n- terraform fmt: ✅\n- terraform validate: ✅\n- tfsec (security scan): ✅\n\n> Para generar un plan, mergeá este PR a \`main\` o ejecutá manual \`plan\` desde Actions.`
+            });
+
+# =============================================================================
+# Job 2: Plan — se ejecuta en push a main o manualmente vía workflow_dispatch
+# =============================================================================
   Plan:
     name: 'Plan'
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.accion == 'plan')
     defaults:
       run:
         working-directory: ./AZURE
@@ -106,27 +159,6 @@ jobs:
           name: reporte-plan-azure
           path: ./AZURE/tfplan
           retention-days: 1
-
-      - name: Publicar Plan como comentario en el PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const planOutput = fs.readFileSync('./AZURE/plan-output.txt', 'utf8');
-
-            // Truncar si es muy largo (GitHub limita comentarios a ~65536 chars)
-            const maxLength = 60000;
-            const truncated = planOutput.length > maxLength
-              ? planOutput.substring(0, maxLength) + '\n\n... (plan truncado por longitud)'
-              : planOutput;
-
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## 📋 Terraform Plan\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n> ⚠️ El plan expira en **24 horas**. Ejecutá el Apply antes de que venza.`
-            });
 
 # =============================================================================
 # Job 2: Apply — se ejecuta manualmente vía workflow_dispatch
