@@ -91,9 +91,12 @@ jobs:
         run: terraform validate
 
       - name: Security Scan (Trivy)
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.60.0
-          trivy config .
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
 
       - name: Resultado de validación
         uses: actions/github-script@v7
@@ -143,9 +146,12 @@ jobs:
         run: terraform validate
 
       - name: Security Scan (Trivy)
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.60.0
-          trivy config .
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
 
       - name: Terraform Plan
         id: plan
