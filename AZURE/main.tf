@@ -44,7 +44,7 @@ resource "azurerm_subnet" "snet_containerapps" {
   delegation {
     name = "delegacion-containerapps"
     service_delegation {
-      name = "Microsoft.App/managedEnvironments"
+      name    = "Microsoft.App/managedEnvironments"
       actions = [
         "Microsoft.Network/virtualNetworks/subnets/join/action",
         "Microsoft.Network/virtualNetworks/subnets/prepareNetworkPolicies/action"
@@ -63,7 +63,7 @@ resource "azurerm_log_analytics_workspace" "containerapps" {
   resource_group_name = azurerm_resource_group.rg.name
   sku                 = "PerGB2018"
   retention_in_days   = 30
-  daily_quota_gb      = 1 # Límite diario para evitar costos inesperados
+  daily_quota_gb      = 1   # Límite diario para evitar costos inesperados
 }
 
 # =============================================================================
@@ -89,12 +89,12 @@ resource "azurerm_container_registry" "acr" {
 # Consumption-only: sin costo fijo, pago por uso
 # =============================================================================
 resource "azurerm_container_app_environment" "cae" {
-  name                           = "cae-felipe"
-  location                       = azurerm_resource_group.rg.location
-  resource_group_name            = azurerm_resource_group.rg.name
-  infrastructure_subnet_id       = azurerm_subnet.snet_containerapps.id
+  name                       = "cae-felipe"
+  location                   = azurerm_resource_group.rg.location
+  resource_group_name        = azurerm_resource_group.rg.name
+  infrastructure_subnet_id   = azurerm_subnet.snet_containerapps.id
   internal_load_balancer_enabled = false
-  zone_redundancy_enabled        = false # Sin zone redundancy para ahorrar costos
+  zone_redundancy_enabled    = false   # Sin zone redundancy para ahorrar costos
 
   log_analytics_workspace_id = azurerm_log_analytics_workspace.containerapps.id
 }
@@ -117,7 +117,7 @@ resource "azurerm_container_app" "app" {
       memory = "0.5Gi"
     }
 
-    min_replicas = 0 # Escala a cero → $0 cuando no hay tráfico
+    min_replicas = 0    # Escala a cero → $0 cuando no hay tráfico
     max_replicas = 1
   }
 
