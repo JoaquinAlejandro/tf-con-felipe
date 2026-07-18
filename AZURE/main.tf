@@ -44,7 +44,7 @@ resource "azurerm_subnet" "snet_containerapps" {
   delegation {
     name = "delegacion-containerapps"
     service_delegation {
-      name = "Microsoft.App/managedEnvironments"
+      name = "Microsoft.App/environments"
       actions = [
         "Microsoft.Network/virtualNetworks/subnets/join/action",
         "Microsoft.Network/virtualNetworks/subnets/prepareNetworkPolicies/action"
@@ -76,12 +76,6 @@ resource "azurerm_container_registry" "acr" {
   location            = azurerm_resource_group.rg.location
   sku                 = "Basic"
   admin_enabled       = true
-
-  # Limpiar imágenes sin uso después de 7 días
-  retention_policy {
-    days    = 7
-    enabled = true
-  }
 }
 
 # =============================================================================
