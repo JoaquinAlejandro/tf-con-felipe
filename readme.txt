@@ -46,7 +46,7 @@ Azure (eastus)
 
 ```
 tf-con-felipe/
-├── BOOTSTRAP/                    # Meta-infraestructura (se ejecuta UNA vez)
+├── BOOTSTRAP/                    # Meta-infraestructura (se ejecuta UNA vez, levanta infraestructura)
 │   ├── main.tf                   # Storage Account para historial de planes
 │   └── providers.tf
 ├── AZURE/                        # Infraestructura principal
