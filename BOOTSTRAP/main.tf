@@ -24,11 +24,6 @@ resource "azurerm_storage_account" "plan_history" {
 
   # Seguridad: solo autenticación Azure AD, sin claves de acceso
   shared_access_key_enabled = false
-
-  network_rules {
-    default_action = "Deny"
-    bypass         = ["AzureServices"]
-  }
 }
 
 # Contenedor para planes aplicados (histórico permanente)
