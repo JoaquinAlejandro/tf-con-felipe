@@ -4,15 +4,16 @@
 #
 # Flujo:
 #   PR → Validate (fmt + validate + trivy) → comentario en PR
-#   Push a main o manual (plan) → Plan → artefacto (1 día)
-#   Dispatch (apply)  → descarga plan → apply → outputs → guarda en Azure Storage
+#   Push a main o manual (plan) → Plan → guarda en Azure Storage (pending-plans, TTL 1d)
+#   Dispatch (apply)  → descarga último plan de pending-plans → apply → mueve a applied-plans
 #   Dispatch (destroy) → destroy
 #
 # Prerrequisitos:
-#   1. Ejecutar BOOTSTRAP/ una vez (crea Storage Account para historial)
+#   1. Ejecutar BOOTSTRAP/ una vez (crea Storage Account, containers, RBAC y lifecycle policy)
 #   2. Configurar environment "production" en GitHub Settings → Environments
 #   3. Agregar secrets: AZURE_CLIENT_ID, AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID,
-#      AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CONTAINER_NAME
+#      AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CONTAINER_PENDING_NAME,
+#      AZURE_STORAGE_CONTAINER_APPLIED_NAME
 # =============================================================================
 
 name: 'Terraform Azure OIDC CI/CD'
@@ -159,12 +160,21 @@ jobs:
           terraform plan -out=tfplan -no-color 2>&1 | tee plan-output.txt
           echo "PLAN_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
 
-      - name: Guardar Plan como Artefacto (1 día de retención)
-        uses: actions/upload-artifact@v4
-        with:
-          name: reporte-plan-azure
-          path: ./AZURE/tfplan
-          retention-days: 1
+      - name: Guardar Plan en Azure Storage (pending-plans)
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+          BLOB_NAME="tfplan-${TIMESTAMP}.plan"
+
+          az storage blob upload \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }} \
+            --container-name ${{ secrets.AZURE_STORAGE_CONTAINER_PENDING_NAME }} \
+            --name "${BLOB_NAME}" \
+            --file ./tfplan \
+            --auth-mode login
+
+          echo "✅ Plan guardado en Azure Storage (pending-plans): ${BLOB_NAME}"
+          echo "## 📦 Plan pendiente de aplicar" >> $GITHUB_STEP_SUMMARY
+          echo "\`${BLOB_NAME}\` (TTL: 1 día)" >> $GITHUB_STEP_SUMMARY
 
 # =============================================================================
 # Job 2: Apply — se ejecuta manualmente vía workflow_dispatch
@@ -195,23 +205,39 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
-      - name: Descargar Plan
+      - name: Descargar último plan de Azure Storage (pending-plans)
         id: download
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: reporte-plan-azure
-          path: ./AZURE
-
-      - name: Verificar que existe el plan
-        if: steps.download.outcome == 'failure'
         run: |
-          echo "============================================"
-          echo "  No hay plan, volver a ejecutar Plan"
-          echo "============================================"
-          echo ""
-          echo "Primero ejecutá un push a main para generar un plan."
-          exit 1
+          echo "🔍 Buscando el último plan en pending-plans..."
+
+          # Listar blobs ordenados por fecha de modificación (más reciente primero)
+          LATEST_BLOB=$(az storage blob list \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }} \
+            --container-name ${{ secrets.AZURE_STORAGE_CONTAINER_PENDING_NAME }} \
+            --auth-mode login \
+            --query "sort_by([], &properties.lastModified)[-1].name" \
+            --output tsv)
+
+          if [ -z "${LATEST_BLOB}" ] || [ "${LATEST_BLOB}" = "None" ]; then
+            echo "============================================"
+            echo "  ❌ No hay planes pendientes"
+            echo "============================================"
+            echo ""
+            echo "Ejecutá un push a main o un Plan manual para generar un plan."
+            exit 1
+          fi
+
+          echo "📥 Descargando: ${LATEST_BLOB}"
+          az storage blob download \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }} \
+            --container-name ${{ secrets.AZURE_STORAGE_CONTAINER_PENDING_NAME }} \
+            --name "${LATEST_BLOB}" \
+            --file ./tfplan \
+            --auth-mode login
+
+          # Guardar el nombre del blob para usarlo después (mover a applied-plans)
+          echo "PENDING_BLOB_NAME=${LATEST_BLOB}" >> $GITHUB_ENV
+          echo "✅ Plan descargado: ${LATEST_BLOB}"
 
       - name: Terraform Apply
         run: terraform apply tfplan
@@ -223,22 +249,30 @@ jobs:
           terraform output -json >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Guardar plan en Azure Storage (historial)
+      - name: Mover plan a historial (applied-plans)
+        if: success()
         run: |
           TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
-          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          BLOB_NAME="plans/tfplan-${TIMESTAMP}-${SHA_SHORT}.plan"
+          APPLIED_BLOB_NAME="tfplan-applied-${TIMESTAMP}.plan"
 
+          # Subir una copia a applied-plans (histórico permanente)
           az storage blob upload \
             --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }} \
-            --container-name ${{ secrets.AZURE_STORAGE_CONTAINER_NAME }} \
-            --name "${BLOB_NAME}" \
+            --container-name ${{ secrets.AZURE_STORAGE_CONTAINER_APPLIED_NAME }} \
+            --name "${APPLIED_BLOB_NAME}" \
             --file ./tfplan \
             --auth-mode login
 
-          echo "✅ Plan guardado en Azure Storage: ${BLOB_NAME}"
-          echo "## 📦 Plan guardado en Azure Storage" >> $GITHUB_STEP_SUMMARY
-          echo "\`${BLOB_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          # Eliminar el plan original de pending-plans
+          az storage blob delete \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }} \
+            --container-name ${{ secrets.AZURE_STORAGE_CONTAINER_PENDING_NAME }} \
+            --name "${PENDING_BLOB_NAME}" \
+            --auth-mode login
+
+          echo "✅ Plan movido a historial: ${APPLIED_BLOB_NAME}"
+          echo "## 📦 Plan aplicado y archivado" >> $GITHUB_STEP_SUMMARY
+          echo "\`${APPLIED_BLOB_NAME}\`" >> $GITHUB_STEP_SUMMARY
 
 # =============================================================================
 # Job 3: Destroy — se ejecuta manualmente vía workflow_dispatch
