@@ -10,8 +10,7 @@
 #
 # Prerrequisitos:
 #   1. Ejecutar BOOTSTRAP/ una vez (crea Storage Account, containers, RBAC y lifecycle policy)
-#   2. Configurar environment "production" en GitHub Settings → Environments
-#   3. Agregar secrets: AZURE_CLIENT_ID, AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID,
+#   2. Agregar secrets: AZURE_CLIENT_ID, AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID,
 #      AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CONTAINER_PENDING_NAME,
 #      AZURE_STORAGE_CONTAINER_APPLIED_NAME
 # =============================================================================
@@ -183,7 +182,6 @@ jobs:
     name: 'Apply'
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.accion == 'apply'
-    environment: production   # Requiere aprobación manual en GitHub
     defaults:
       run:
         working-directory: ./AZURE
@@ -281,7 +279,6 @@ jobs:
     name: 'Destroy'
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.accion == 'destroy'
-    environment: production   # Requiere aprobación manual en GitHub
     defaults:
       run:
         working-directory: ./AZURE
