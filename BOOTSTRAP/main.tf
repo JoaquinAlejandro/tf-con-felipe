@@ -21,6 +21,11 @@ resource "azurerm_storage_account" "plan_history" {
   account_tier             = "Standard"
   account_replication_type = "LRS"
   min_tls_version          = "TLS1_2"
+  network_rules {
+    default_action             = "Deny"
+    bypass                     = ["AzureServices"]
+    virtual_network_subnet_ids = []
+  }
 }
 
 # Contenedor dentro de la Storage Account
