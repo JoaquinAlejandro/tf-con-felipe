@@ -21,18 +21,57 @@ resource "azurerm_storage_account" "plan_history" {
   account_tier             = "Standard"
   account_replication_type = "LRS"
   min_tls_version          = "TLS1_2"
+
+  # Seguridad: solo autenticación Azure AD, sin claves de acceso
+  shared_access_key_enabled = false
+
   network_rules {
-    default_action             = "Deny"
-    bypass                     = ["AzureServices"]
-    virtual_network_subnet_ids = []
+    default_action = "Deny"
+    bypass         = ["AzureServices"]
   }
 }
 
-# Contenedor dentro de la Storage Account
+# Contenedor para planes aplicados (histórico permanente)
 resource "azurerm_storage_container" "applied_plans" {
   name                  = "applied-plans"
-  storage_account_name  = azurerm_storage_account.plan_history.name
+  storage_account_id    = azurerm_storage_account.plan_history.id
   container_access_type = "private"
+}
+
+# Contenedor para planes pendientes de aplicar (TTL 1 día)
+resource "azurerm_storage_container" "pending_plans" {
+  name                  = "pending-plans"
+  storage_account_id    = azurerm_storage_account.plan_history.id
+  container_access_type = "private"
+}
+
+# Lifecycle policy: eliminar blobs en pending-plans tras 1 día
+resource "azurerm_storage_management_policy" "plan_lifecycle" {
+  storage_account_id = azurerm_storage_account.plan_history.id
+
+  rule {
+    name    = "delete-pending-plans-after-1-day"
+    enabled = true
+
+    filters {
+      blob_types   = ["blockBlob"]
+      prefix_match = ["pending-plans/"]
+    }
+
+    actions {
+      base_blob {
+        delete_after_days_since_modification_greater_than = 1
+      }
+    }
+  }
+}
+
+# RBAC: asignar Storage Blob Data Contributor al Service Principal de GitHub
+# Así solo el pipeline puede leer/escribir blobs en esta Storage Account
+resource "azurerm_role_assignment" "github_sp_blob_contributor" {
+  scope                = azurerm_storage_account.plan_history.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azuread_service_principal.github_actions.object_id
 }
 
 # =============================================================================
@@ -44,7 +83,17 @@ output "storage_account_name" {
   value       = azurerm_storage_account.plan_history.name
 }
 
-output "storage_container_name" {
-  description = "Agregar como secret AZURE_STORAGE_CONTAINER_NAME en GitHub"
+output "storage_container_applied_name" {
+  description = "Agregar como secret AZURE_STORAGE_CONTAINER_APPLIED_NAME en GitHub"
   value       = azurerm_storage_container.applied_plans.name
+}
+
+output "storage_container_pending_name" {
+  description = "Agregar como secret AZURE_STORAGE_CONTAINER_PENDING_NAME en GitHub"
+  value       = azurerm_storage_container.pending_plans.name
+}
+
+output "github_sp_object_id" {
+  description = "Object ID del Service Principal de GitHub (informativo)"
+  value       = data.azuread_service_principal.github_actions.object_id
 }
