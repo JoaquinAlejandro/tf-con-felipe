@@ -184,102 +184,97 @@ La app corre `nginx` como placeholder. Después se reemplaza por la imagen real 
 
 **¿Qué se cambió?** El archivo `.github/workflows/azure-terraform.yml` se reescribió por completo.
 
-#### 4a. De 2 jobs a 3 jobs
+#### 4a. De 2 jobs a 4 jobs
 
-| Antes | Ahora | ¿Cuándo se ejecuta? |
+| Job | ¿Cuándo se ejecuta? | ¿Qué hace? |
 |---|---|---|
-| `terraform-plan` | `Plan` | Automático en cada PR |
-| `terraform-apply` | `Apply` | Manual (workflow_dispatch) |
-| _(no existía)_ | `Destroy` | Manual (workflow_dispatch) |
+| `Validate` | PR hacia `main` | `fmt` + `validate` + `trivy` (security scan) |
+| `Plan` | Push a `main` o manual | Genera plan y lo guarda en Azure Storage (`pending-plans`) |
+| `Apply` | Manual (`workflow_dispatch`) | Descarga el último plan de `pending-plans`, aplica, archiva en `applied-plans` |
+| `Destroy` | Manual (`workflow_dispatch`) | Destruye toda la infraestructura |
 
-#### 4b. Validaciones automáticas en el Plan
+#### 4b. Validaciones automáticas en cada PR
 
-Cada PR ahora ejecuta 4 validaciones antes de generar el plan:
+Cada PR ejecuta 3 validaciones antes de permitir el merge:
 
 ```
 git checkout → azure login → terraform init
   → terraform fmt -check    ← ¿El código tiene formato correcto?
   → terraform validate      ← ¿La sintaxis es válida?
-  → tfsec                   ← ¿Hay configuraciones inseguras?
-  → terraform plan          ← ¿Qué recursos se van a crear/modificar/destruir?
+  → trivy (security scan)   ← ¿Hay configuraciones inseguras?
 ```
 
-Si cualquiera de los primeros tres falla, el pipeline se detiene y el PR no se puede mergear.
+Si cualquiera falla, el pipeline se detiene y el PR muestra ❌.
 
-#### 4c. El plan se publica como comentario en el PR
-
-Usando `actions/github-script@v7`, el output del plan aparece directamente en el PR. Ya no hace falta entrar a Actions para ver qué va a cambiar.
-
-#### 4d. El artefacto del plan expira en 1 día
+#### 4c. El plan se guarda en Azure Storage (no en GitHub Artifacts)
 
 ```yaml
-- uses: actions/upload-artifact@v4
-  with:
-    retention-days: 1    # Fuerza a aplicar el plan el mismo día
+# Plan → guarda en pending-plans (TTL: 1 día)
+az storage blob upload \
+  --container-name pending-plans \
+  --name "tfplan-20260720-143022.plan" \
+  --file ./tfplan \
+  --auth-mode login
 ```
 
-**¿Por qué?** Si pasa más de un día, el entorno de Azure pudo haber cambiado y el plan ya no es válido. Esto obliga a mantener el ciclo plan → apply ágil.
+**¿Por qué Azure Storage y no GitHub Artifacts?**
+- GitHub Artifacts expiran y no son auditables fácilmente
+- Azure Storage permite lifecycle policies (TTL automático)
+- El historial queda en Azure, junto con la infraestructura
+- RBAC granular: solo el Service Principal de GitHub puede leer/escribir
 
-#### 4e. El Apply reutiliza el plan (no genera uno nuevo)
+#### 4d. El Apply descarga el último plan de Azure
 
 ```yaml
-# Antes (riesgoso):
-- run: terraform apply -auto-approve    # Genera un plan NUEVO al vuelo
+# Apply → busca el plan más reciente en pending-plans
+LATEST_BLOB=$(az storage blob list \
+  --container-name pending-plans \
+  --query "sort_by([], &properties.lastModified)[-1].name")
 
-# Ahora (seguro):
-- uses: actions/download-artifact@v4    # Descarga el plan generado en el PR
-- run: terraform apply tfplan           # Aplica EXACTAMENTE ese plan
+# Descarga y aplica
+az storage blob download --name "${LATEST_BLOB}" --file ./tfplan
+terraform apply tfplan
 ```
 
-**¿Por qué es importante?** Si el Apply genera un plan nuevo, podría aplicar cambios diferentes a los que se revisaron en el PR. Al reutilizar el plan, hay certeza de que se aplica exactamente lo que se aprobó.
+**¿Por qué es importante?** El Apply aplica **exactamente** el plan que se generó y revisó. No genera un plan nuevo al vuelo.
 
-#### 4f. Mensaje de error claro si no hay plan
-
-Si el artefacto expiró (más de 1 día) o nunca se generó, el pipeline muestra:
-
-```
-============================================
-  No hay plan, volver a ejecutar Plan
-============================================
-```
-
-En vez de un error genérico de GitHub que no explica qué pasó.
-
-#### 4g. Aprobación manual con GitHub Environments
+#### 4e. Post-apply: el plan se mueve a historial
 
 ```yaml
-jobs:
-  Apply:
-    environment: production    # Pausa el pipeline hasta que un revisor apruebe
-```
-
-Esto se configura en **Settings → Environments → production → Required reviewers**. Sin esta protección, cualquiera con acceso al repo podría hacer `apply` o `destroy`.
-
-#### 4h. Historial de planes en Azure Storage
-
-Después de cada apply exitoso, el plan se guarda en la Storage Account del bootstrap:
-
-```
-applied-plans/plans/
-  ├── tfplan-20260717-143022-abc1234.plan
-  ├── tfplan-20260718-091500-def5678.plan
-  └── ...
+# Éxito → archivar en applied-plans (histórico permanente)
+az storage blob upload --container-name applied-plans --name "tfplan-applied-20260720-150000.plan"
+# Eliminar de pending-plans
+az storage blob delete --container-name pending-plans --name "${PENDING_BLOB_NAME}"
 ```
 
 Esto permite auditar qué se aplicó y cuándo. Si algo sale mal, se puede revisar el plan exacto que se ejecutó.
 
-#### 4i. Job de Destroy
+#### 4f. TTL de 1 día en planes pendientes
+
+Los planes en `pending-plans` se eliminan automáticamente después de 1 día mediante una **lifecycle management policy** configurada en el BOOTSTRAP. Esto evita acumular planes viejos y fuerza a mantener el ciclo plan → apply ágil.
+
+#### 4g. Mensaje de error claro si no hay plan
+
+Si no hay planes en `pending-plans` (porque expiraron o nunca se generó uno):
+
+```
+============================================
+  ❌ No hay planes pendientes
+============================================
+Ejecutá un push a main o un Plan manual para generar un plan.
+```
+
+#### 4h. Job de Destroy
 
 ```yaml
 jobs:
   Destroy:
     if: github.event.inputs.accion == 'destroy'
-    environment: production
     steps:
       - run: terraform destroy -auto-approve
 ```
 
-Permite limpiar todos los recursos desde GitHub, con la misma protección de aprobación manual.
+Permite limpiar todos los recursos desde GitHub Actions.
 
 ---
 
@@ -297,6 +292,110 @@ Permite limpiar todos los recursos desde GitHub, con la misma protección de apr
 *.tfstate.*
 .terraform.lock.hcl
 ```
+
+---
+
+### Cambio 6: Hardening de seguridad en BOOTSTRAP
+
+**¿Qué problema resuelve?** La Storage Account `sttfplanhistory` que guarda los planes del pipeline necesitaba controles de seguridad más estrictos para evitar que terceros pudieran leer o modificar los planes.
+
+**¿Qué se cambió?**
+
+#### 6a. Solo autenticación Azure AD (sin claves de acceso)
+
+```hcl
+resource "azurerm_storage_account" "plan_history" {
+  shared_access_key_enabled = false   # Nadie puede usar la storage account key
+}
+```
+
+**¿Por qué?** Las claves de acceso son un vector de ataque común. Al deshabilitarlas, toda autenticación debe pasar por Azure AD, donde se aplican políticas de RBAC.
+
+#### 6b. RBAC granular: solo el pipeline puede leer/escribir blobs
+
+```hcl
+resource "azurerm_role_assignment" "github_sp_blob_contributor" {
+  scope                = azurerm_storage_account.plan_history.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azuread_service_principal.github_actions.object_id
+}
+```
+
+**¿Por qué?** El rol `Contributor` a nivel suscripción permite gestionar recursos pero **no** permite leer/escribir blobs (son planos distintos: management vs data). `Storage Blob Data Contributor` otorga acceso al data plane exclusivamente al Service Principal de GitHub Actions.
+
+#### 6c. Lifecycle policy: TTL de 1 día en planes pendientes
+
+```hcl
+resource "azurerm_storage_management_policy" "plan_lifecycle" {
+  rule {
+    name    = "delete-pending-plans-after-1-day"
+    filters {
+      prefix_match = ["pending-plans/"]
+    }
+    actions {
+      base_blob {
+        delete_after_days_since_modification_greater_than = 1
+      }
+    }
+  }
+}
+```
+
+**¿Por qué?** Evita acumular planes viejos en `pending-plans`. Si un plan no se aplica en 24 horas, se elimina automáticamente. Esto fuerza a mantener el ciclo plan → apply ágil y evita costos de almacenamiento innecesarios.
+
+#### 6d. Provider upgrade a azurerm 4.x + azuread
+
+```hcl
+terraform {
+  required_providers {
+    azurerm = { version = "~> 4.70.0" }
+    azuread = { version = "~> 2.53" }
+  }
+}
+```
+
+**¿Por qué?** `azurerm` 4.x es necesario para `storage_use_azuread = true` (operaciones de storage vía Azure AD). `azuread` se usa para resolver el Service Principal de GitHub por su `client_id` y así asignarle el rol RBAC.
+
+#### 6e. Sin restricciones de red (confianza en RBAC)
+
+Se eliminaron las `network_rules` con `default_action = "Deny"` porque los runners de GitHub Actions **no son considerados "Azure Services"** y eran bloqueados. La seguridad se mantiene vía RBAC: sin el rol `Storage Blob Data Contributor`, nadie puede leer/escribir blobs aunque la red esté abierta.
+
+#### 6f. Nuevo container `pending-plans`
+
+```hcl
+resource "azurerm_storage_container" "pending_plans" {
+  name = "pending-plans"
+}
+```
+
+Separa los planes pendientes de aplicar (TTL 1 día) de los planes ya aplicados (`applied-plans`, histórico permanente).
+
+---
+
+### Cambio 7: Resource Provider auto-registration
+
+**¿Qué problema resuelve?** Al ejecutar el Apply, fallaba con:
+
+```
+MissingSubscriptionRegistration: The subscription is not registered
+to use namespace 'Microsoft.App'.
+```
+
+**¿Qué son los Resource Providers?** Cada servicio de Azure (VMs, Container Apps, etc.) pertenece a un "namespace" que debe estar registrado en la suscripción antes de usarse. Terraform, por defecto, solo registra un subconjunto mínimo (Compute, Network, Storage). `Microsoft.App` (Container Apps) no está en ese subconjunto.
+
+**¿Qué se cambió?** En `AZURE/providers.tf`:
+
+```hcl
+provider "azurerm" {
+  features {}
+  resource_provider_registrations = "all"   # ← Registrar TODO lo necesario
+}
+```
+
+**¿Por qué `"all"`?** Garantiza que cualquier recurso que se agregue en el futuro (Container Apps, PostgreSQL, Key Vault, etc.) tenga su provider registrado automáticamente. Alternativas más restrictivas:
+- `"extended"` — cubre la mayoría de recursos comunes
+- `"core"` — solo Compute, Network, Storage
+- `"none"` — no registra nada (requiere registro manual)
 
 ---
 
@@ -330,11 +429,14 @@ Permite limpiar todos los recursos desde GitHub, con la misma protección de apr
 │  └── ca-felipe-app (nginx, escala a cero)                   │
 │                                                             │
 │  rg-tf-pipeline-meta (bootstrap)                            │
-│  └── sttfplanhistory / applied-plans (historial)            │
+│  └── sttfplanhistory                                        │
+│      ├── pending-plans (TTL 1 día, planes por aplicar)      │
+│      └── applied-plans (histórico permanente)               │
 │                                                             │
-│  Pipeline: 3 jobs, fmt+validate+tfsec,                       │
-│            plan en PR, apply con aprobación,                 │
-│            destroy, historial en Azure                       │
+│  Pipeline: 4 jobs, Validate (PR) → Plan (push/main)         │
+│            → Apply (manual) → Destroy (manual)              │
+│            Plan/Apply vía Azure Storage (no artifacts)      │
+│            RBAC + Azure AD auth (sin claves de acceso)      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -348,7 +450,7 @@ Permite limpiar todos los recursos desde GitHub, con la misma protección de apr
 | Container App (escala a cero) | ~$0-5.00 |
 | Log Analytics (1 GB/día) | ~$0-2.00 |
 | Virtual Network + Subnets | $0 (gratis) |
-| Storage Account (bootstrap) | ~$0.10 |
+| Storage Account + Lifecycle Management (bootstrap) | ~$0.10 |
 | **Total** | **~$5-7/mes** |
 
 ---
@@ -373,29 +475,54 @@ terraform apply
 | `AZURE_SUBSCRIPTION_ID` | ID de la suscripción |
 | `AZURE_TENANT_ID` | Tenant ID de Azure AD |
 | `AZURE_STORAGE_ACCOUNT_NAME` | `sttfplanhistory` (output del bootstrap) |
-| `AZURE_STORAGE_CONTAINER_NAME` | `applied-plans` (output del bootstrap) |
+| `AZURE_STORAGE_CONTAINER_PENDING_NAME` | `pending-plans` (output del bootstrap) |
+| `AZURE_STORAGE_CONTAINER_APPLIED_NAME` | `applied-plans` (output del bootstrap) |
 
-### 3. Environment "production"
+### 3. Resource Providers
 
-**Settings → Environments → production** → Required reviewers: agregar al menos uno.
+El pipeline registra automáticamente los Resource Providers necesarios (`resource_provider_registrations = "all"`). Si ejecutás Terraform localmente, asegurate de que `Microsoft.App` esté registrado:
+
+```powershell
+az provider register --namespace Microsoft.App
+```
 
 ---
 
 ## Uso del pipeline
 
-### Ejecutar un Plan (automático)
+### Flujo completo
 
-Crear un PR hacia `main` que modifique archivos en `AZURE/`. El pipeline ejecuta `fmt → validate → tfsec → plan` y publica el resultado como comentario.
+```
+PR abierto ──→ Validate (fmt + validate + trivy)
+                                          ↓
+                              Si falla → ❌ no mergear
+                              Si pasa → ✅ mergear a main
+                                          ↓
+PR mergeado ──→ Push a main ──→ Plan ──→ guarda en pending-plans (TTL 1d)
+                                          ↓
+                              workflow_dispatch "apply"
+                                          ↓
+                              Apply ──→ descarga último plan de pending-plans
+                                    ──→ terraform apply tfplan
+                                    ──→ archiva en applied-plans
+                                    ──→ borra de pending-plans
+```
 
-### Ejecutar un Apply (manual)
+### Ejecutar un Plan
 
-**Actions → Run workflow → `accion: apply`** → Un revisor aprueba → Se aplica el plan.
+**Automático**: Crear un PR hacia `main` que modifique archivos en `AZURE/`. Al mergear, el Plan se ejecuta y guarda el resultado en Azure Storage.
 
-> ⚠️ Si pasaron más de 24 horas: **"No hay plan, volver a ejecutar Plan"**.
+**Manual**: **Actions → Run workflow → `accion: plan`**
 
-### Ejecutar un Destroy (manual)
+### Ejecutar un Apply
 
-**Actions → Run workflow → `accion: destroy`** → Un revisor aprueba → Se destruyen todos los recursos.
+**Actions → Run workflow → `accion: apply`** → Descarga el último plan de `pending-plans` y lo aplica.
+
+> ⚠️ Si pasaron más de 24 horas desde el Plan: el plan se eliminó por TTL. Volvé a ejecutar Plan primero.
+
+### Ejecutar un Destroy
+
+**Actions → Run workflow → `accion: destroy`** → Destruye todos los recursos.
 
 ---
 
