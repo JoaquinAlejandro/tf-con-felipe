@@ -55,6 +55,8 @@ tf-con-felipe/
 ├── .github/workflows/
 │   └── azure-terraform.yml       # Pipeline CI/CD
 ├── .gitignore                    # Excluye archivos de estado de Terraform
+├── .trivyignore                  # Ignora falso positivo AZU-0012 (intencional)
+├── docker-compose.yml            # Herramientas de desarrollo (Trivy, etc.)
 └── readme.txt                    # Este archivo
 ```
 
@@ -484,6 +486,54 @@ El pipeline registra automáticamente los Resource Providers necesarios (`resour
 
 ```powershell
 az provider register --namespace Microsoft.App
+```
+
+---
+
+## Herramientas de desarrollo con Docker
+
+El proyecto incluye un `docker-compose.yml` para ejecutar herramientas de análisis sin instalarlas en tu PC.
+
+### Trivy (seguridad de infraestructura)
+
+```yaml
+services:
+  trivy-scan:
+    image: aquasec/trivy:latest
+    volumes:
+      - .:/workspace
+    command: config /workspace/AZURE /workspace/BOOTSTRAP
+```
+
+**Uso**:
+
+```powershell
+# Escanear ambos directorios
+docker compose run --rm trivy-scan
+
+# Solo AZURE/
+docker compose run --rm trivy-scan-azure
+```
+
+### Ignorar falsos positivos (`.trivyignore`)
+
+Trivy detecta `AZU-0012` (Storage Account sin `network_rules`) como CRITICAL. Esto es **intencional** en nuestro caso:
+
+- Los runners de GitHub Actions no son Azure Services y serían bloqueados por `network_rules`
+- La seguridad se mantiene con `shared_access_key_enabled = false` + RBAC (`Storage Blob Data Contributor`)
+
+El archivo `.trivyignore` excluye este check:
+
+```
+# Ignorar AZU-0012: decisión deliberada (ver README Cambio 6e)
+AZU-0012
+```
+
+Para probar que Trivy respeta el ignore:
+
+```powershell
+docker compose run --rm trivy-scan
+# → Debería mostrar 0 failures
 ```
 
 ---
