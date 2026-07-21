@@ -97,6 +97,7 @@ jobs:
           scan-ref: '.'
           exit-code: '1'
           severity: 'CRITICAL,HIGH'
+          trivyignores: .trivyignore
 
       - name: Resultado de validación
         uses: actions/github-script@v7
@@ -152,6 +153,7 @@ jobs:
           scan-ref: '.'
           exit-code: '1'
           severity: 'CRITICAL,HIGH'
+          trivyignores: .trivyignore
 
       - name: Terraform Plan
         id: plan

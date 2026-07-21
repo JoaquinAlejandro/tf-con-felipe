@@ -1,0 +1,8 @@
+# Ignorar AZU-0012: "No network rules defined and default action allows access"
+# Decisión deliberada: los runners de GitHub Actions no son Azure Services,
+# por lo que network_rules con default_action = "Deny" los bloquea.
+# La seguridad se mantiene mediante:
+#   - shared_access_key_enabled = false (solo Azure AD auth)
+#   - RBAC: Storage Blob Data Contributor exclusivo al SP de GitHub
+# Véase: https://avd.aquasec.com/misconfig/azu-0012
+AZU-0012

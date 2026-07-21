@@ -1,0 +1,42 @@
+# =============================================================================
+# Herramientas de desarrollo para Terraform
+# =============================================================================
+# Uso:
+#   docker compose run trivy-scan        → Escanea AZURE/ y BOOTSTRAP/
+#   docker compose run trivy-scan-azure   → Solo AZURE/
+#   docker compose run trivy-check        → Escanea y explica el finding AZU-0012
+#
+# Nota: El directorio actual se monta en /workspace dentro del contenedor.
+# =============================================================================
+
+services:
+  trivy-scan:
+    image: aquasec/trivy:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        trivy config /workspace/AZURE --exit-code 1 --severity CRITICAL,HIGH
+        trivy config /workspace/BOOTSTRAP --exit-code 1 --severity CRITICAL,HIGH
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    profiles:
+      - trivy
+
+  trivy-scan-azure:
+    image: aquasec/trivy:latest
+    command: config /workspace/AZURE --exit-code 1 --severity CRITICAL,HIGH
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    profiles:
+      - trivy
+
+  trivy-scan-bootstrap:
+    image: aquasec/trivy:latest
+    command: config /workspace/BOOTSTRAP --exit-code 1 --severity CRITICAL,HIGH
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    profiles:
+      - trivy
