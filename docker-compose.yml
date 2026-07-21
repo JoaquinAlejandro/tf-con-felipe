@@ -12,7 +12,11 @@
 services:
   trivy-scan:
     image: aquasec/trivy:latest
-    command: config /workspace/AZURE /workspace/BOOTSTRAP
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        trivy config /workspace/AZURE --exit-code 1 --severity CRITICAL,HIGH
+        trivy config /workspace/BOOTSTRAP --exit-code 1 --severity CRITICAL,HIGH
     working_dir: /workspace
     volumes:
       - .:/workspace
@@ -21,7 +25,16 @@ services:
 
   trivy-scan-azure:
     image: aquasec/trivy:latest
-    command: config /workspace/AZURE
+    command: config /workspace/AZURE --exit-code 1 --severity CRITICAL,HIGH
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    profiles:
+      - trivy
+
+  trivy-scan-bootstrap:
+    image: aquasec/trivy:latest
+    command: config /workspace/BOOTSTRAP --exit-code 1 --severity CRITICAL,HIGH
     working_dir: /workspace
     volumes:
       - .:/workspace

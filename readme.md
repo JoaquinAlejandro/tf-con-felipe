@@ -508,11 +508,14 @@ services:
 **Uso**:
 
 ```powershell
-# Escanear ambos directorios
+# Escanear ambos directorios (AZURE y BOOTSTRAP)
 docker compose run --rm trivy-scan
 
 # Solo AZURE/
 docker compose run --rm trivy-scan-azure
+
+# Solo BOOTSTRAP/
+docker compose run --rm trivy-scan-bootstrap
 ```
 
 ### Ignorar falsos positivos (`.trivyignore`)
