@@ -42,3 +42,6 @@ variable "github_sp_client_id" {
 data "azuread_service_principal" "github_actions" {
   client_id = var.github_sp_client_id
 }
+
+# Data source para obtener el tenant ID y el object ID del usuario local
+data "azuread_client_config" "current" {}

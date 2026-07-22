@@ -70,6 +70,40 @@ resource "azurerm_role_assignment" "github_sp_blob_contributor" {
 }
 
 # =============================================================================
+# Key Vault — almacenamiento seguro de secretos
+# Los secretos se consumen desde AZURE/ mediante data sources
+# =============================================================================
+
+# Key Vault para almacenar secretos de forma segura
+resource "azurerm_key_vault" "infra" {
+  name                = "kv-tf-pipeline-meta"
+  resource_group_name = azurerm_resource_group.bootstrap_rg.name
+  location            = azurerm_resource_group.bootstrap_rg.location
+  tenant_id           = data.azuread_client_config.current.tenant_id
+  sku_name            = "standard"
+
+  # Solo Azure AD auth (consistente con shared_access_key_enabled = false)
+  enable_rbac_authorization = true
+
+  # Soft-delete retention por si se borra algo por error
+  soft_delete_retention_days = 7
+}
+
+# RBAC: el SP de GitHub solo puede LEER secretos (no crearlos ni modificarlos)
+resource "azurerm_role_assignment" "github_sp_kv_secrets_user" {
+  scope                = azurerm_key_vault.infra.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = data.azuread_service_principal.github_actions.object_id
+}
+
+# RBAC: el usuario local puede CREAR y ADMINISTRAR secretos
+resource "azurerm_role_assignment" "local_kv_secrets_officer" {
+  scope                = azurerm_key_vault.infra.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = data.azuread_client_config.current.object_id
+}
+
+# =============================================================================
 # Outputs — copiar estos valores a los secrets de GitHub
 # =============================================================================
 
@@ -91,4 +125,14 @@ output "storage_container_pending_name" {
 output "github_sp_object_id" {
   description = "Object ID del Service Principal de GitHub (informativo)"
   value       = data.azuread_service_principal.github_actions.object_id
+}
+
+output "key_vault_name" {
+  description = "Nombre del Key Vault para referenciar desde AZURE/"
+  value       = azurerm_key_vault.infra.name
+}
+
+output "key_vault_id" {
+  description = "ID del Key Vault para data sources"
+  value       = azurerm_key_vault.infra.id
 }
