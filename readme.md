@@ -46,8 +46,8 @@ Azure (eastus)
 
 ```
 tf-con-felipe/
-├── BOOTSTRAP/                    # Meta-infraestructura (se ejecuta UNA vez, levanta infraestructura)
-│   ├── main.tf                   # Storage Account para historial de planes
+├── BOOTSTRAP/                    # Meta-infraestructura (se ejecuta UNA vez)
+│   ├── main.tf                   # Storage Account, Key Vault, containers, RBAC
 │   └── providers.tf
 ├── AZURE/                        # Infraestructura principal
 │   ├── main.tf                   # VNet, subredes, Container Apps, ACR
@@ -401,6 +401,83 @@ provider "azurerm" {
 
 ---
 
+### Cambio 8: Gestión de secretos con Azure Key Vault
+
+**¿Qué problema resuelve?** Las aplicaciones (Container Apps, bases de datos, APIs) necesitan credenciales: contraseñas de base de datos, API keys, tokens de autenticación, etc. Almacenarlos en el repositorio (aunque sea en variables de entorno del pipeline) es inseguro:
+
+- **En el repo**: cualquier persona con acceso al código los ve
+- **En GitHub Secrets**: están cifrados pero no hay auditoría de quién los usó
+- **En el código**: si alguien hace `git log`, puede encontrar secretos que se commitearon por error
+
+**¿Qué es Azure Key Vault?** Es un servicio de Azure para almacenar secretos de forma segura, con:
+
+- **Cifrado en reposo y en tránsito** — los secretos nunca viajan sin cifrar
+- **Auditoría completa** — Azure registra quién leyó cada secreto y cuándo
+- **Rotación programática** — se pueden rotar secretos sin cambiar el código
+- **RBAC granular** — cada identidad tiene permisos específicos (lectura, escritura, etc.)
+
+**¿Qué se creó?** En `BOOTSTRAP/main.tf`:
+
+```hcl
+resource "azurerm_key_vault" "infra" {
+  name                = "kv-tf-pipeline-meta"
+  resource_group_name = azurerm_resource_group.bootstrap_rg.name
+  sku_name            = "standard"
+
+  # Solo Azure AD auth (sin claves de acceso)
+  enable_rbac_authorization = true
+}
+```
+
+**¿Cómo se controla el acceso?**
+
+| Identidad | Rol en el Key Vault | Puede hacer |
+|---|---|---|
+| SP de GitHub (pipeline) | `Key Vault Secrets User` | Leer secretos en tiempo de `apply` |
+| Usuario local | `Key Vault Secrets Officer` | Crear, rotar y eliminar secretos |
+
+**¿Cómo se usa en la práctica?**
+
+1. **Agregar un secreto** (desde tu máquina):
+   ```powershell
+   az keyvault secret set --vault-name kv-tf-pipeline-meta --name "db-password" --value "MiPasswordSegura123!"
+   ```
+
+2. **Consumirlo desde Terraform** (en `AZURE/main.tf`):
+   ```hcl
+   data "azurerm_key_vault_secret" "db_password" {
+     name         = "db-password"
+     key_vault_id = azurerm_key_vault.infra.id
+   }
+
+   resource "azurerm_container_app" "app" {
+     template {
+       container {
+         env {
+           name  = "DB_PASSWORD"
+           value = data.azurerm_key_vault_secret.db_password.value
+         }
+       }
+     }
+   }
+   ```
+
+3. El pipeline, al ejecutar `terraform apply`, obtiene el secreto directamente desde Azure Key Vault. **El secreto nunca está en el repositorio ni en los logs del pipeline.**
+
+**¿Por qué usar Key Vault y no GitHub Secrets?** Ambos son válidos, pero Key Vault ofrece ventajas adicionales:
+
+| Aspecto | GitHub Secrets | Azure Key Vault |
+|---|---|---|
+| Rotación de secretos | Manual, requiere editar en GitHub | Programática, sin tocar el pipeline |
+| Auditoría | Quién ejecutó el workflow | Quién leyó cada secreto y cuándo |
+| Límite de tamaño | 64 KB por secret | Ilimitado |
+| Consumo desde Terraform | Solo como env var | Data source nativo |
+| Compatibilidad multi-servicio | Solo GitHub | Azure, APIs, apps, etc. |
+
+**¿Dónde se creó?** En el BOOTSTRAP (`rg-tf-pipeline-meta`), porque es un servicio de meta-infraestructura compartido que pueden consumir tanto `AZURE/` como futuros proyectos.
+
+---
+
 ## Resumen visual de los cambios
 
 ```
@@ -434,11 +511,13 @@ provider "azurerm" {
 │  └── sttfplanhistory                                        │
 │      ├── pending-plans (TTL 1 día, planes por aplicar)      │
 │      └── applied-plans (histórico permanente)               │
+│  └── kv-tf-pipeline-meta (secretos cifrados)                │
 │                                                             │
 │  Pipeline: 4 jobs, Validate (PR) → Plan (push/main)         │
 │            → Apply (manual) → Destroy (manual)              │
 │            Plan/Apply vía Azure Storage (no artifacts)      │
 │            RBAC + Azure AD auth (sin claves de acceso)      │
+│            Secretos vía Key Vault (nunca en el repo)        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
