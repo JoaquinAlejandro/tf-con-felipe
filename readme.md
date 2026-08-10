@@ -22,6 +22,12 @@ No guardar tokens en `terraform.tfvars` ni en Git. Inyectar como variables
 `TF_VAR_turso_auth_token`, `TF_VAR_query_api_api_key`, `TF_VAR_embedding_api_key`
 y `TF_VAR_github_token`, o resolverlos desde un backend de secretos.
 
+El Key Vault de bootstrap no es consumido actualmente por los workflows. Los
+secretos de CI/CD se mantienen en GitHub Secrets. El Key Vault permanece
+protegido con Azure RBAC y ACL de red `default_action = "Deny"`; si se necesita
+administrarlo localmente, se debe autorizar temporalmente la IP pública del
+administrador o usar una conexión privada.
+
 Proyecto de infraestructura como código (IaC) para desplegar recursos en Azure usando Terraform y GitHub Actions. Este documento explica qué hace el proyecto, cómo está organizado, y el paso a paso de cada cambio aplicado.
 
 ---
