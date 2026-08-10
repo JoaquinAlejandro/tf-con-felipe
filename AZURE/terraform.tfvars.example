@@ -1,0 +1,24 @@
+# =============================================================================
+# Ejemplo de variables para AI Project Chat Workflow
+# =============================================================================
+# Copia este archivo como terraform.tfvars y completa los valores.
+# Los valores marcados como "sensitive" se pueden pasar también como
+# variables de entorno TF_VAR_* o desde GitHub Secrets.
+# =============================================================================
+
+turso_db_url        = "libsql://my-database.turso.io"
+turso_auth_token    = "eyJhbGciOiJ..."  # turso db create-token my-database
+
+openrouter_api_key  = "sk-or-v1-..."
+embedding_api_key   = "sk-or-v1-..."    # misma key si usas OpenRouter
+
+# Opcionales
+# embedding_endpoint  = "https://openrouter.ai/api/v1"
+# embedding_model     = "openai/text-embedding-3-small"
+# embedding_provider  = "OpenAI"
+# embedding_dimensions = "1536"
+# sentry_dsn          = "https://..."
+# github_token        = "ghp_..."
+# query_api_external_enabled = true
+# query_api_api_key          = "usar-TF_VAR_query_api_api_key-o-Key-Vault"
+# github_actions_principal_id = "object-id-del-service-principal-OIDC"
