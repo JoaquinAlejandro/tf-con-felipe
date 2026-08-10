@@ -109,7 +109,15 @@ resource "azurerm_key_vault" "infra" {
   sku_name            = "standard"
 
   # Solo Azure AD auth (consistente con shared_access_key_enabled = false)
-  enable_rbac_authorization = true
+  rbac_authorization_enabled = true
+
+  # Los workflows actuales usan GitHub Secrets y no consumen este Key Vault.
+  # Se restringe el acceso de red para evitar exposición pública; el acceso
+  # administrativo se puede habilitar temporalmente desde una IP autorizada.
+  network_acls {
+    bypass         = "AzureServices"
+    default_action = "Deny"
+  }
 
   # Soft-delete retention por si se borra algo por error
   soft_delete_retention_days = 7
