@@ -40,10 +40,11 @@ resource "azurerm_storage_container" "pending_plans" {
   container_access_type = "private"
 }
 
-# Lifecycle policy: eliminar blobs en pending-plans tras 1 día
+# Lifecycle policy: gestionar el ciclo de vida de los planes
 resource "azurerm_storage_management_policy" "plan_lifecycle" {
   storage_account_id = azurerm_storage_account.plan_history.id
 
+  # Regla 1: planes pendientes → borrar tras 1 día
   rule {
     name    = "delete-pending-plans-after-1-day"
     enabled = true
@@ -56,6 +57,31 @@ resource "azurerm_storage_management_policy" "plan_lifecycle" {
     actions {
       base_blob {
         delete_after_days_since_modification_greater_than = 1
+      }
+    }
+  }
+
+  # Regla 2: planes aplicados → tiering progresivo (Hot → Cool → Cold → Archive → Delete)
+  rule {
+    name    = "tier-applied-plans-progressively"
+    enabled = true
+
+    filters {
+      blob_types   = ["blockBlob"]
+      prefix_match = ["applied-plans/"]
+    }
+
+    actions {
+      base_blob {
+        # Días 0-3:   🔥 Hot (tier por defecto, recién aplicado)
+        # Día 3+:     💧 Cool
+        tier_to_cool_after_days_since_modification_greater_than = 3
+        # Día 30+:    ❄️ Cold
+        tier_to_cold_after_days_since_modification_greater_than = 30
+        # Día 90+:    🗄️ Archive
+        tier_to_archive_after_days_since_modification_greater_than = 90
+        # Día 365+:   🗑️ Delete
+        delete_after_days_since_modification_greater_than = 365
       }
     }
   }

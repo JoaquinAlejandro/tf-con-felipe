@@ -1,5 +1,27 @@
 # tf-con-felipe — Infraestructura Azure con Terraform
 
+## Workloads de AI Context Platform
+
+La infraestructura despliega dos workloads en un único Azure Container Apps
+Environment para mantener bajo el costo:
+
+- **`ca-query-api`**: Container App HTTP, escala de 0 a 1 réplica y expone
+  HTTPS. `/health` es público para probes; el resto de las rutas requiere el
+  header `x-api-key` configurado mediante `QUERY_API_API_KEY`.
+- **`caj-context-indexer`**: Container Apps Job manual, sin ingress. GitHub
+  Actions lo inicia mediante `az containerapp job start` usando OIDC y RBAC;
+  no se expone ningún endpoint del indexador a Internet.
+
+El Job solo consume recursos durante una ejecución. El pipeline de aplicación
+publica las imágenes en ACR y actualiza Query API; Terraform permanece en este
+repositorio.
+
+### Variables sensibles
+
+No guardar tokens en `terraform.tfvars` ni en Git. Inyectar como variables
+`TF_VAR_turso_auth_token`, `TF_VAR_query_api_api_key`, `TF_VAR_embedding_api_key`
+y `TF_VAR_github_token`, o resolverlos desde un backend de secretos.
+
 Proyecto de infraestructura como código (IaC) para desplegar recursos en Azure usando Terraform y GitHub Actions. Este documento explica qué hace el proyecto, cómo está organizado, y el paso a paso de cada cambio aplicado.
 
 ---
@@ -18,7 +40,8 @@ Azure (eastus)
     ├── law-containerapps                    ← Log Analytics (monitoreo)
     ├── crtfconfelipe                        ← Azure Container Registry
     ├── cae-felipe                           ← Container App Environment
-    └── ca-felipe-app                        ← Container App (nginx)
+    ├── ca-query-api                         ← Query API (privada, escala a cero)
+    └── caj-context-indexer                  ← Context Indexer (Job batch manual)
 ```
 
 ### ¿Qué es cada recurso?
@@ -46,8 +69,8 @@ Azure (eastus)
 
 ```
 tf-con-felipe/
-├── BOOTSTRAP/                    # Meta-infraestructura (se ejecuta UNA vez, levanta infraestructura)
-│   ├── main.tf                   # Storage Account para historial de planes
+├── BOOTSTRAP/                    # Meta-infraestructura (se ejecuta UNA vez)
+│   ├── main.tf                   # Storage Account, Key Vault, containers, RBAC
 │   └── providers.tf
 ├── AZURE/                        # Infraestructura principal
 │   ├── main.tf                   # VNet, subredes, Container Apps, ACR
@@ -325,25 +348,59 @@ resource "azurerm_role_assignment" "github_sp_blob_contributor" {
 
 **¿Por qué?** El rol `Contributor` a nivel suscripción permite gestionar recursos pero **no** permite leer/escribir blobs (son planos distintos: management vs data). `Storage Blob Data Contributor` otorga acceso al data plane exclusivamente al Service Principal de GitHub Actions.
 
-#### 6c. Lifecycle policy: TTL de 1 día en planes pendientes
+#### 6c. Lifecycle policy: TTL de 1 día en planes pendientes + tiering progresivo en applied-plans
+
+La Storage Account tiene una política de ciclo de vida con dos reglas:
+
+**Regla 1 — Planes pendientes**: se eliminan tras 1 día sin aplicar.
 
 ```hcl
-resource "azurerm_storage_management_policy" "plan_lifecycle" {
-  rule {
-    name    = "delete-pending-plans-after-1-day"
-    filters {
-      prefix_match = ["pending-plans/"]
-    }
-    actions {
-      base_blob {
-        delete_after_days_since_modification_greater_than = 1
-      }
+rule {
+  name    = "delete-pending-plans-after-1-day"
+  filters  { prefix_match = ["pending-plans/"] }
+  actions {
+    base_blob { delete_after_days_since_modification_greater_than = 1 }
+  }
+}
+```
+
+**Regla 2 — Planes aplicados**: bajan de tier progresivamente para reducir costos.
+
+```hcl
+rule {
+  name    = "tier-applied-plans-progressively"
+  filters  { prefix_match = ["applied-plans/"] }
+  actions {
+    base_blob {
+      tier_to_cool_after_days_since_modification_greater_than    = 3
+      tier_to_cold_after_days_since_modification_greater_than    = 30
+      tier_to_archive_after_days_since_modification_greater_than = 90
+      delete_after_days_since_modification_greater_than           = 365
     }
   }
 }
 ```
 
-**¿Por qué?** Evita acumular planes viejos en `pending-plans`. Si un plan no se aplica en 24 horas, se elimina automáticamente. Esto fuerza a mantener el ciclo plan → apply ágil y evita costos de almacenamiento innecesarios.
+**¿Qué son los tiers de almacenamiento?** Azure Storage ofrece cuatro niveles de acceso, que se diferencian en costo de almacenamiento vs. costo y velocidad de recuperación:
+
+| Tier | Costo almacenamiento | Costo recuperación | Velocidad |
+|---|---|---|---|
+| **Hot** (predeterminado) | Más alto | Gratis | Inmediata |
+| **Cool** | Bajo (~50% menos) | Bajo | Minutos |
+| **Cold** | Muy bajo (~80% menos) | Medio | Minutos |
+| **Archive** | Mínimo (~95% menos) | Alto | Horas |
+
+**¿Por qué esta progresión?**
+
+| Período | Tier | Razón |
+|---|---|---|
+| Días 0-3 | 🔥 Hot | Recién aplicado, puede necesitarse para verificar el deployment |
+| Días 3-30 | 💧 Cool | Siguen siendo recientes, pero el acceso es esporádico |
+| Días 30-90 | ❄️ Cold | Solo se consultan si hay incidentes |
+| Días 90-365 | 🗄️ Archive | Conservación por auditoría, recuperación lenta aceptable |
+| Día 365+ | 🗑️ Borrar | Un año de historial es suficiente para cumplimiento |
+
+**¿Cuánto ahorra?** Un plan típico ocupa ~1-2 MB. Si se generan 50 planes al año (~75-100 MB), tenerlos todos en Hot costaría ~$0.02/mes. Con tiering, baja a ~$0.001/mes. En este proyecto es un ahorro pequeño, pero es una buena práctica que escala a medida que crece el historial.
 
 #### 6d. Provider upgrade a azurerm 4.x + azuread
 
@@ -401,6 +458,83 @@ provider "azurerm" {
 
 ---
 
+### Cambio 8: Gestión de secretos con Azure Key Vault
+
+**¿Qué problema resuelve?** Las aplicaciones (Container Apps, bases de datos, APIs) necesitan credenciales: contraseñas de base de datos, API keys, tokens de autenticación, etc. Almacenarlos en el repositorio (aunque sea en variables de entorno del pipeline) es inseguro:
+
+- **En el repo**: cualquier persona con acceso al código los ve
+- **En GitHub Secrets**: están cifrados pero no hay auditoría de quién los usó
+- **En el código**: si alguien hace `git log`, puede encontrar secretos que se commitearon por error
+
+**¿Qué es Azure Key Vault?** Es un servicio de Azure para almacenar secretos de forma segura, con:
+
+- **Cifrado en reposo y en tránsito** — los secretos nunca viajan sin cifrar
+- **Auditoría completa** — Azure registra quién leyó cada secreto y cuándo
+- **Rotación programática** — se pueden rotar secretos sin cambiar el código
+- **RBAC granular** — cada identidad tiene permisos específicos (lectura, escritura, etc.)
+
+**¿Qué se creó?** En `BOOTSTRAP/main.tf`:
+
+```hcl
+resource "azurerm_key_vault" "infra" {
+  name                = "kv-tf-pipeline-meta"
+  resource_group_name = azurerm_resource_group.bootstrap_rg.name
+  sku_name            = "standard"
+
+  # Solo Azure AD auth (sin claves de acceso)
+  enable_rbac_authorization = true
+}
+```
+
+**¿Cómo se controla el acceso?**
+
+| Identidad | Rol en el Key Vault | Puede hacer |
+|---|---|---|
+| SP de GitHub (pipeline) | `Key Vault Secrets User` | Leer secretos en tiempo de `apply` |
+| Usuario local | `Key Vault Secrets Officer` | Crear, rotar y eliminar secretos |
+
+**¿Cómo se usa en la práctica?**
+
+1. **Agregar un secreto** (desde tu máquina):
+   ```powershell
+   az keyvault secret set --vault-name kv-tf-pipeline-meta --name "db-password" --value "MiPasswordSegura123!"
+   ```
+
+2. **Consumirlo desde Terraform** (en `AZURE/main.tf`):
+   ```hcl
+   data "azurerm_key_vault_secret" "db_password" {
+     name         = "db-password"
+     key_vault_id = azurerm_key_vault.infra.id
+   }
+
+   resource "azurerm_container_app" "app" {
+     template {
+       container {
+         env {
+           name  = "DB_PASSWORD"
+           value = data.azurerm_key_vault_secret.db_password.value
+         }
+       }
+     }
+   }
+   ```
+
+3. El pipeline, al ejecutar `terraform apply`, obtiene el secreto directamente desde Azure Key Vault. **El secreto nunca está en el repositorio ni en los logs del pipeline.**
+
+**¿Por qué usar Key Vault y no GitHub Secrets?** Ambos son válidos, pero Key Vault ofrece ventajas adicionales:
+
+| Aspecto | GitHub Secrets | Azure Key Vault |
+|---|---|---|
+| Rotación de secretos | Manual, requiere editar en GitHub | Programática, sin tocar el pipeline |
+| Auditoría | Quién ejecutó el workflow | Quién leyó cada secreto y cuándo |
+| Límite de tamaño | 64 KB por secret | Ilimitado |
+| Consumo desde Terraform | Solo como env var | Data source nativo |
+| Compatibilidad multi-servicio | Solo GitHub | Azure, APIs, apps, etc. |
+
+**¿Dónde se creó?** En el BOOTSTRAP (`rg-tf-pipeline-meta`), porque es un servicio de meta-infraestructura compartido que pueden consumir tanto `AZURE/` como futuros proyectos.
+
+---
+
 ## Resumen visual de los cambios
 
 ```
@@ -434,11 +568,13 @@ provider "azurerm" {
 │  └── sttfplanhistory                                        │
 │      ├── pending-plans (TTL 1 día, planes por aplicar)      │
 │      └── applied-plans (histórico permanente)               │
+│  └── kv-tf-pipeline-meta (secretos cifrados)                │
 │                                                             │
 │  Pipeline: 4 jobs, Validate (PR) → Plan (push/main)         │
 │            → Apply (manual) → Destroy (manual)              │
 │            Plan/Apply vía Azure Storage (no artifacts)      │
 │            RBAC + Azure AD auth (sin claves de acceso)      │
+│            Secretos vía Key Vault (nunca en el repo)        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
